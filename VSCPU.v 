@@ -1,0 +1,351 @@
+`timescale 1ns/1ps
+
+module VSCPU (clk, rst, data_fromRAM, wrEn, addr_toRAM, data_toRAM);
+  input  clk, rst;
+  output reg wrEn;
+  input  [31:0] data_fromRAM;
+  output reg [31:0] data_toRAM;
+  output reg [13:0] addr_toRAM;
+
+  reg [2:0]  st, stN;
+  reg [13:0] PC, PCN;
+  reg [31:0] IW, IWN;
+  reg [31:0] R1, R1N;   
+
+  wire [2:0]  op = IW[31:29];
+  wire im = IW[28];
+  wire [13:0] A  = IW[27:14];
+  wire [13:0] B  = IW[13:0];
+
+  // SUB/SUBi
+  wire isSUB = (op == 3'b000) && (IW[13] == 1'b1);
+
+  wire [13:0] Bsub   = {1'b0, IW[12:0]};          
+  wire [31:0] imm32  = {18'd0, B};                 
+  wire [31:0] imm32s = {19'd0, IW[12:0]};           
+
+  always @(posedge clk) begin
+    st <= stN;
+    PC <= PCN;
+    IW <= IWN;
+    R1 <= R1N;
+  end
+
+  always @* begin
+    wrEn       = 1'b0;
+    stN        = st;
+    PCN        = PC;
+    IWN        = IW;
+    R1N        = R1;
+    addr_toRAM = PC;
+    data_toRAM = 32'd0;
+
+    if (rst) begin
+      stN  = 3'd0;
+      PCN  = 14'd0;
+      IWN  = 32'd0;
+      R1N  = 32'd0;
+      wrEn = 1'b0;
+      addr_toRAM = 14'd0;
+      data_toRAM = 32'd0;
+    end
+    else begin
+      case (st)
+
+        // S0: FETCH
+        3'd0: begin
+          addr_toRAM = PC;
+          stN = 3'd1;
+        end
+
+        // S1: DECODE 
+        3'd1: begin
+          IWN = data_fromRAM;
+
+          case (data_fromRAM[31:29])
+            3'b100: begin
+              if (data_fromRAM[28] == 1'b0) addr_toRAM = data_fromRAM[13:0];
+              stN = 3'd2;
+            end
+
+            3'b101: begin
+              if (data_fromRAM[28] == 1'b0) addr_toRAM = data_fromRAM[13:0];
+              else                          addr_toRAM = data_fromRAM[27:14];
+              stN = 3'd2;
+            end
+
+            default: begin
+              addr_toRAM = data_fromRAM[27:14];
+              stN = 3'd2;
+            end
+          endcase
+        end
+
+        3'd2: begin
+          // 000: ADD/ADDi/SUB/SUBi
+          if (op == 3'b000) begin
+            R1N = data_fromRAM;
+
+            if (im) begin
+              wrEn       = 1'b1;
+              addr_toRAM = A;
+              if (isSUB) data_toRAM = data_fromRAM - imm32s;
+              else       data_toRAM = data_fromRAM + imm32;  
+              PCN = PC + 14'd1;
+              stN = 3'd0;
+            end 
+            else begin
+              addr_toRAM = isSUB ? Bsub : B;
+              stN = 3'd3;
+            end
+          end
+
+          // 001: NAND/NANDi
+          else if (op == 3'b001) begin
+            R1N = data_fromRAM;
+            if (im) begin
+              wrEn       = 1'b1;
+              addr_toRAM = A;
+              data_toRAM = ~(data_fromRAM & imm32);
+              PCN = PC + 14'd1;
+              stN = 3'd0;
+            end 
+            else begin
+              addr_toRAM = B;
+              stN = 3'd3;
+            end
+          end
+
+          // 010: SRL/SRLi  
+          else if (op == 3'b010) begin
+            R1N = data_fromRAM; 
+
+            if (im) begin
+              wrEn       = 1'b1;
+              addr_toRAM = A;
+
+              if (imm32 < 32)
+                data_toRAM = (data_fromRAM >> imm32[4:0]);
+              else
+                data_toRAM = (data_fromRAM << ((imm32 - 32) & 32'h1F));
+
+              PCN = PC + 14'd1;
+              stN = 3'd0;
+            end 
+            else begin
+              addr_toRAM = B;
+              stN = 3'd3;
+            end
+          end
+
+          // 011: LT/LTi
+          else if (op == 3'b011) begin
+            R1N = data_fromRAM;
+            if (im) begin
+              wrEn       = 1'b1;
+              addr_toRAM = A;
+              data_toRAM = (data_fromRAM < imm32) ? 32'd1 : 32'd0;
+              PCN = PC + 14'd1;
+              stN = 3'd0;
+            end 
+            else begin
+              addr_toRAM = B;
+              stN = 3'd3;
+            end
+          end
+
+          // 100: CP/CPi
+          else if (op == 3'b100) begin
+            if (im) begin
+              wrEn       = 1'b1;
+              addr_toRAM = A;
+              data_toRAM = imm32;
+              PCN = PC + 14'd1;
+              stN = 3'd0;
+            end 
+            else begin
+              wrEn       = 1'b1;
+              addr_toRAM = A;
+              data_toRAM = data_fromRAM; 
+              PCN = PC + 14'd1;
+              stN = 3'd0;
+            end
+          end
+
+          // 101: CPI/CPIi
+          else if (op == 3'b101) begin
+            if (!im) begin
+              R1N = data_fromRAM;
+              addr_toRAM = data_fromRAM[13:0];
+              stN = 3'd3;
+            end 
+            else begin
+              R1N = data_fromRAM;
+              addr_toRAM = B;
+              stN = 3'd3;
+            end
+          end
+
+          // 110: BZJ/BZJi
+          else if (op == 3'b110) begin
+            R1N = data_fromRAM;
+            if (im) begin
+              PCN = data_fromRAM[13:0] + B;
+              stN = 3'd0;
+            end 
+            else begin
+              addr_toRAM = B;
+              stN = 3'd3;
+            end
+          end
+
+          // 111: MUL/MULi
+          else if (op == 3'b111) begin
+            R1N = data_fromRAM;
+            if (im) begin
+              wrEn       = 1'b1;
+              addr_toRAM = A;
+              data_toRAM = data_fromRAM * imm32;
+              PCN = PC + 14'd1;
+              stN = 3'd0;
+            end 
+            else begin
+              addr_toRAM = B;
+              stN = 3'd3;
+            end
+          end
+        end
+
+        
+        3'd3: begin
+          // ADD / SUB
+          if (op == 3'b000 && !im) begin
+            wrEn       = 1'b1;
+            addr_toRAM = A;
+            if (isSUB) data_toRAM = R1 - data_fromRAM; 
+            else       data_toRAM = R1 + data_fromRAM; 
+            PCN = PC + 14'd1;
+            stN = 3'd0;
+          end
+
+          else if (op == 3'b001 && !im) begin
+            wrEn       = 1'b1;
+            addr_toRAM = A;
+            data_toRAM = ~(R1 & data_fromRAM);
+            PCN = PC + 14'd1;
+            stN = 3'd0;
+          end
+
+          // SRL 
+          else if (op == 3'b010 && !im) begin
+            wrEn       = 1'b1;
+            addr_toRAM = A;
+
+            if (data_fromRAM < 32)
+              data_toRAM = (R1 >> data_fromRAM[4:0]);
+            else
+              data_toRAM = (R1 << ((data_fromRAM - 32) & 32'h1F));
+
+            PCN = PC + 14'd1;
+            stN = 3'd0;
+          end
+
+          else if (op == 3'b011 && !im) begin
+            wrEn       = 1'b1;
+            addr_toRAM = A;
+            data_toRAM = (R1 < data_fromRAM) ? 32'd1 : 32'd0;
+            PCN = PC + 14'd1;
+            stN = 3'd0;
+          end
+
+          else if (op == 3'b101) begin
+            if (!im) begin
+              wrEn       = 1'b1;
+              addr_toRAM = A;
+              data_toRAM = data_fromRAM;
+              PCN = PC + 14'd1;
+              stN = 3'd0;
+            end
+            else begin
+              wrEn       = 1'b1;
+              addr_toRAM = R1[13:0];
+              data_toRAM = data_fromRAM;
+              PCN = PC + 14'd1;
+              stN = 3'd0;
+            end
+          end
+
+          else if (op == 3'b110 && !im) begin
+            if (data_fromRAM == 32'd0) PCN = R1[13:0];
+            else                       PCN = PC + 14'd1;
+            stN = 3'd0;
+          end
+
+          else if (op == 3'b111 && !im) begin
+            wrEn       = 1'b1;
+            addr_toRAM = A;
+            data_toRAM = R1 * data_fromRAM;
+            PCN = PC + 14'd1;
+            stN = 3'd0;
+          end
+        end
+
+      endcase
+    end
+  end
+endmodule
+
+
+module blram(clk, rst, we, addr, din, dout);
+  parameter SIZE = 14, DEPTH = 2**SIZE;
+  input clk;
+  input rst;
+  input we;
+  input [SIZE-1:0] addr;
+  input [31:0] din;
+  output reg [31:0] dout;
+
+  reg [31:0] mem [DEPTH-1:0];
+
+  initial begin
+    // -PROGRAM (from simulator "Output Initial Memory") -
+    mem[0]  = 32'h901b8003;
+    mem[1]  = 32'h0190065;     
+    mem[2]  = 32'he0190066;
+    mem[3]  = 32'h50198001;
+    mem[4]  = 32'h801a0064;
+    mem[5]  = 32'h101a0005;
+    mem[6]  = 32'h201a006c;
+    mem[7]  = 32'h301a0005;
+    mem[8]  = 32'h401b0066;
+    mem[9]  = 32'hf01b0003;
+    mem[10] = 32'h001b8067;    
+    mem[11] = 32'h801c006e;
+    mem[12] = 32'h601c006f;
+    mem[13] = 32'hc01bc070;
+    mem[14] = 32'hd019400b;
+    mem[19] = 32'hf0194003;
+    mem[20] = 32'h801a4066;
+    mem[21] = 32'h701a4002;
+    mem[22] = 32'hc01c4069;
+    mem[35] = 32'hd01bc035;
+    mem[54] = 32'hb01c806f;
+    mem[55] = 32'ha01e4066;
+
+    // ---- DATA (from simulator) ----
+    mem[100] = 32'h00000005;
+    mem[101] = 32'h00000008;
+    mem[102] = 32'h00000010;
+    mem[103] = 32'hffffffff;
+    mem[108] = 32'h00010007;
+    mem[111] = 32'h00000001;
+    mem[113] = 32'h00000023;
+    mem[114] = 32'h00000078;
+  end
+
+  always @(posedge clk) begin
+    if (we)
+      mem[addr] <= din;
+    dout <= mem[addr];
+  end
+endmodule
